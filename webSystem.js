@@ -1,4 +1,3 @@
-//
 import { creatorX } from "./handlers/page/webhook.js";
 import { createDiscordListener } from "./handlers/discord/discordLogin.js";
 import { tphHandler } from "./handlers/talkersPH/tphHandler.js";
@@ -10,6 +9,57 @@ const wssUsers = new Map();
 
 const http = require("http");
 const WebSocket = require("ws");
+
+// ==================== SAFE WEBSOCKET UTILITIES ====================
+const safeWebSocketErrors = ['duplexify', 'ending', '_writable', 'websocket-stream'];
+
+function isWebSocketError(error) {
+  if (!error || !error.message) return false;
+  const msg = error.message.toLowerCase();
+  return safeWebSocketErrors.some(keyword => msg.includes(keyword));
+}
+
+function safeWebSocketSend(socket, data, callback) {
+  if (!socket || socket._safeDestroyed || socket.readyState !== WebSocket.OPEN) {
+    if (callback) callback(new Error('Socket not available'));
+    return;
+  }
+  
+  try {
+    socket.send(data, (err) => {
+      if (err && isWebSocketError(err)) {
+        console.log('[SafeWebSocket] Ignored send error:', err.message);
+        if (callback) callback(null); // Successfully ignored
+      } else if (callback) {
+        callback(err);
+      }
+    });
+  } catch (err) {
+    if (isWebSocketError(err)) {
+      console.log('[SafeWebSocket] Caught send error:', err.message);
+      if (callback) callback(null);
+    } else {
+      if (callback) callback(err);
+    }
+  }
+}
+
+function safeWebSocketClose(socket, code = 1000, reason = 'Normal closure') {
+  if (!socket || socket._safeDestroyed) return;
+  
+  socket._safeDestroyed = true;
+  try {
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+      socket.close(code, reason);
+    }
+  } catch (err) {
+    if (!isWebSocketError(err)) {
+      console.log('[SafeWebSocket] Close error:', err.message);
+    }
+  }
+}
+// ==================== END SAFE UTILITIES ====================
+
 export class Listener {
   /**
    *
@@ -18,13 +68,14 @@ export class Listener {
   constructor({ api, app }) {
     this.api = api;
     this.app = app;
-
     this.callback = () => {};
+    
     if (api?.sendMessage) {
       const e = api?.listenMqtt?.((err, event) => {
         this.#callListener(err, event);
       });
     }
+    
     app.post("/listenMsg", (req, res) => {
       try {
         const event = req.body;
@@ -39,19 +90,39 @@ export class Listener {
 
     const httpServer = http.createServer(app);
 
+    // Safe WebSocket Server creation
     const wss = new WebSocket.Server({
       server: httpServer,
       path: "/ws",
+      perMessageDeflate: false,
+      clientTracking: true,
+      maxPayload: 1048576, // 1MB
     });
-    global.logger("Server created.", "Websocket");
+
+    // Safe error handling for WebSocket server
+    wss.on('error', (error) => {
+      if (isWebSocketError(error)) {
+        console.log('[WebSocket Server] Safe error handling:', error.message);
+        return;
+      }
+      console.error('[WebSocket Server Error]:', error);
+    });
+
+    wss.on('close', () => {
+      console.log('[WebSocket Server] Closed gracefully');
+    });
+
+    global.logger("WebSocket server created with safety features.", "Websocket");
     this.httpServer = httpServer;
     this.wss = wss;
+    
     app.get("/ws-url", (req, res) => {
       res.json({
         url: `wss://${req.headers.host}/ws`,
       });
     });
   }
+  
   async startListen(callback = () => {}) {
     this.callback = callback;
     try {
@@ -65,20 +136,25 @@ export class Listener {
       this.app.get("/webhook", handleGetEvents);
       this.pageApi = pageApi;
     } catch (error) {
-      console.log(error);
+      console.log('Start listen error:', error.message);
     }
   }
+  
   async #callListener(err, data, willEvent) {
     try {
       this.callback(err, willEvent ? new Event(data) : data);
     } catch (error) {
-      console.log(error);
+      console.log('Call listener error:', error.message);
     }
   }
+  
   _call = this.#callListener;
 }
+
 import axios from "axios";
+
 export const pref = "w@";
+
 export async function postEvent(event) {
   try {
     const response = await axios.post("http://localhost:8000/listenMsg", event);
@@ -119,10 +195,10 @@ export function formatIPLegacy(ip) {
     return ip;
   }
 }
+
 export function generateWssMessageID() {
   const ID =
     "wss-mid_" + Date.now() + "_" + Math.random().toString(36).substring(7);
-
   return ID;
 }
 
@@ -163,13 +239,13 @@ export function formatWssEvent(event) {
             : event.password === WEB_PASSWORD
             ? "wss:admin"
             : "wss:main",
-
           senderID: event.senderID ? formatIP(`${event.senderID}`) : "wss:bot",
         }
       : {}),
     originalEvent: event,
   };
 }
+
 export class Event {
   constructor({ ...info } = {}) {
     let defaults = {
@@ -205,11 +281,14 @@ export class Event {
     }
   }
 }
+
 import fs from "fs";
 import fetchMeta from "./CommandFiles/modules/fetchMeta.js";
+
 export function genericPage(...replacer) {
   return pageParse("public/generic.html", ...replacer);
 }
+
 export function pageParse(filepath, ...replacer) {
   let content = fs.readFileSync(filepath, "utf-8");
 
@@ -246,6 +325,7 @@ export function pageParse(filepath, ...replacer) {
 
   return content;
 }
+
 export async function aiPage(prompt) {
   const whatToDo = `Create a full effort, very satisfying, decent, and a very long HTML page with complete css, use the json below as guide, make sure to make it dark theme and add gradient texts, send it as HTML without comments.
   
@@ -303,6 +383,7 @@ export class WssAPI {
     this._socket = socket;
     this._queue = [];
   }
+  
   sendMessage(message, _, ...args) {
     let body;
     if (typeof message === "string") {
@@ -315,6 +396,7 @@ export class WssAPI {
         body: String(message.body || ""),
       };
     }
+    
     let messageReply = null;
     let argg =
       typeof args[0] === "string"
@@ -328,6 +410,7 @@ export class WssAPI {
         senderID: "wss:main",
       };
     }
+    
     const self = this;
     return new Promise((resolve) => {
       self._queue.push({
@@ -342,6 +425,7 @@ export class WssAPI {
           resolve(data);
         },
       });
+      
       handleMessage(
         self._socket,
         {
@@ -354,6 +438,7 @@ export class WssAPI {
       );
     });
   }
+  
   async editMessage(str, messageID, callback) {
     console.log(`Editing ${messageID} with: ${str}`);
     handleEditMessage(this._socket, { body: str, messageID });
@@ -361,6 +446,7 @@ export class WssAPI {
       callback(true, true);
     }
   }
+  
   getCurrentUserID() {
     return "wss:bot";
   }
@@ -375,6 +461,7 @@ export async function recordUser(userID = "wss:user", socket) {
   if (typeof userID !== "string" || !userID) {
     return console.error(`malformed: ${userID}`);
   }
+  
   if (!wssUsers.has(userID)) {
     wssUsers.set(userID, socket);
     socket.panelID = userID;
@@ -407,17 +494,9 @@ export async function deleteUser(userID) {
   if (wssUsers.has(userID)) {
     const socket = wssUsers.get(userID);
 
-    if (socket && typeof socket.close === "function") {
-      if (
-        socket.readyState === WebSocket.OPEN ||
-        socket.readyState === WebSocket.CONNECTING
-      ) {
-        socket.close();
-        console.log(`Closed WebSocket for user: ${userID}`);
-      } else {
-        console.log(`WebSocket already closed for user: ${userID}`);
-      }
-    }
+    // Safe close
+    safeWebSocketClose(socket);
+    
     const data = await global.handleStat.getCache(formatIP(userID));
     const meta = await fetchMeta(userID);
 
@@ -437,20 +516,19 @@ export async function deleteUser(userID) {
 export function sendAllWS(data) {
   let { body, messageReply, botSend, ...etc } = data;
   for (const [userID, socket] of wssUsers) {
-    socket.send(
-      JSON.stringify({
-        ...etc,
-        type: messageReply ? "message_reply" : "message",
-        body: String(body),
-        isYou: data.senderID === userID,
-        botSend: !!botSend,
-      })
-    );
+    safeWebSocketSend(socket, JSON.stringify({
+      ...etc,
+      type: messageReply ? "message_reply" : "message",
+      body: String(body),
+      isYou: data.senderID === userID,
+      botSend: !!botSend,
+    }));
   }
 }
+
 export function doAllWS(data) {
   for (const [userID, socket] of wssUsers) {
-    socket.send(data);
+    safeWebSocketSend(socket, data);
   }
 }
 
@@ -460,54 +538,89 @@ export function doAllWS(data) {
  */
 export function handleWebSocket(ws, funcListen) {
   ws.on("connection", (socket) => {
-    const api = new WssAPI(socket);
-    socket.on("message", (i) => {
-      const data = JSON.parse(i);
-      if (socket._xPassword) {
-        data.password = socket._xPassword;
-      }
-      //console.log(data);
-      function listenCall({ ...props } = {}) {
-        const payload = { ...formatWssEvent({ ...data, ...props }) };
-        funcListen(null, payload, { wssApi: api });
-      }
-      if (data.botSend) {
+    // Mark socket as safe
+    socket._safeDestroyed = false;
+    socket._safeId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    
+    console.log(`[WebSocket] New connection: ${socket._safeId}`);
+    
+    // Safe error handler
+    socket.on("error", (error) => {
+      if (isWebSocketError(error)) {
+        console.log(`[SafeWebSocket ${socket._safeId}] Handled error:`, error.message);
+        socket._safeDestroyed = true;
         return;
       }
-      if (socket.panelID) {
-        data.senderID ??= socket.panelID;
-      }
-
-      switch (data.type) {
-        case "login":
-          let { WEB_PASSWORD } = global.Cassidy.config;
-          if (process.env.WEB_PASSWORD) {
-            WEB_PASSWORD = process.env.WEB_PASSWORD;
-          }
-          if (data.password !== WEB_PASSWORD) {
-            socket.send(
-              JSON.stringify({
-                type: "login_failure",
-              })
-            );
-          } else {
-            socket._xPassword = data.password;
-          }
-          recordUser(data.panelID, socket);
-          break;
-        case "message":
-          handleMessage(socket, data, listenCall, api);
-          break;
-        case "message_reply":
-          handleMessage(socket, data, listenCall, api);
-          break;
-        case "message_reaction":
-          handleReaction(socket, data, listenCall, api);
-      }
+      console.error(`[WebSocket ${socket._safeId} Error]:`, error);
     });
-    socket.on("close", () => {
+    
+    // Safe close handler
+    socket.on("close", (code, reason) => {
+      socket._safeDestroyed = true;
+      console.log(`[WebSocket ${socket._safeId}] Closed:`, code, reason);
       deleteUser(socket.panelID);
     });
+    
+    const api = new WssAPI(socket);
+    
+    socket.on("message", (i) => {
+      try {
+        const data = JSON.parse(i);
+        if (socket._xPassword) {
+          data.password = socket._xPassword;
+        }
+        
+        function listenCall({ ...props } = {}) {
+          const payload = { ...formatWssEvent({ ...data, ...props }) };
+          funcListen(null, payload, { wssApi: api });
+        }
+        
+        if (data.botSend) {
+          return;
+        }
+        
+        if (socket.panelID) {
+          data.senderID ??= socket.panelID;
+        }
+
+        switch (data.type) {
+          case "login":
+            let { WEB_PASSWORD } = global.Cassidy.config;
+            if (process.env.WEB_PASSWORD) {
+              WEB_PASSWORD = process.env.WEB_PASSWORD;
+            }
+            if (data.password !== WEB_PASSWORD) {
+              safeWebSocketSend(socket, JSON.stringify({
+                type: "login_failure",
+              }));
+            } else {
+              socket._xPassword = data.password;
+            }
+            recordUser(data.panelID, socket);
+            break;
+          case "message":
+            handleMessage(socket, data, listenCall, api);
+            break;
+          case "message_reply":
+            handleMessage(socket, data, listenCall, api);
+            break;
+          case "message_reaction":
+            handleReaction(socket, data, listenCall, api);
+            break;
+        }
+      } catch (err) {
+        console.log(`[WebSocket ${socket._safeId}] Message error:`, err.message);
+      }
+    });
+  });
+  
+  // Server-level error handling
+  ws.on('error', (error) => {
+    if (isWebSocketError(error)) {
+      console.log('[WebSocket Server] Safe error handling:', error.message);
+      return;
+    }
+    console.error('[WebSocket Server Error]:', error);
   });
 }
 
@@ -553,26 +666,12 @@ export function handleMessage(socket, data, listenCall, api) {
   let { body, messageReply, botSend } = data;
   const messageID = generateWssMessageID();
   listenCall ??= function () {};
+  
   if (socket) {
     console.log(`Sending data with messageID: ${messageID}`);
-    // socket.send(
-    //   JSON.stringify({
-    //     type: messageReply ? "message_reply" : "message",
-    //     body: String(body),
-    //     messageID,
-    //     ...(messageReply
-    //       ? {
-    //           messageReply: {
-    //             senderID: "wss:bot",
-    //             ...messageReply,
-    //           },
-    //         }
-    //       : {}),
-    //     botSend: !!botSend,
-    //   })
-    // );
     sendAllWS({ ...data, messageID });
   }
+  
   if (botSend && api._queue.length > 0) {
     const { resolve } = api._queue.shift();
     if (resolve) {
