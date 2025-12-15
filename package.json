@@ -8,7 +8,7 @@
   "license": "ISC",
 
   "scripts": {
-    "start": "node index.js",
+    "start": "node -r ./polyfills.js index.js",
     "build": "[ ! -d ./dist-commandfiles ] && (command -v npx >/dev/null 2>&1 && npx tsc || tsc) || echo 'dist-commandfiles exists, skipping compilation'",
     "dev": "node dist-commandfiles/index.js",
     "clean": "rm -rf ./dist-commandfiles",
